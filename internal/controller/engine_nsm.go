@@ -241,7 +241,7 @@ lbProcs=2
 BrokerDBDir = ${SPOOL}/brokerstore
 CfgDir = /zeek/etc
 CrashExpireInterval = 0
-HaveNFS=1
+HaveNFS=0
 LogDir = /zeek/logs
 LogExpireInterval = 0
 LogRotationInterval = 0
@@ -284,7 +284,6 @@ redef digest_salt = "Please change this value. OK.";
 @load protocols/dns/detect-external-names
 @load protocols/ftp/detect
 @load protocols/ftp/software
-@load protocols/http/detect-sqli
 @load protocols/http/software
 @load protocols/smtp/software
 @load protocols/ssh/detect-bruteforcing
@@ -294,7 +293,6 @@ redef digest_salt = "Please change this value. OK.";
 @load protocols/ssl/known-certs
 @load protocols/ssl/log-hostcerts-only
 @load protocols/ssl/validate-certs
-@load tuning/defaults
 @load-sigs frameworks/signatures/detect-windows-shells
 
 `,
@@ -355,13 +353,12 @@ func ZeekCtrArgs(nodeType string) []string {
 		cli = []string{
 			"bash",
 			"-c",
-			"set -ux -o pipefail; /usr/sbin/sshd; /zeek/bin/zeekctl deploy; while true; do /zeek/bin/zeekctl status; sleep 30; done",
+			"set -ux -o pipefail; /usr/sbin/sshd; until /zeek/bin/zeekctl deploy; do sleep 10; done; while true; do /zeek/bin/zeekctl status; sleep 30; done",
 		}
 	} else {
 		cli = []string{
 			"/usr/sbin/sshd",
 			"-D",
-			"-d",
 		}
 	}
 	return cli
@@ -377,9 +374,33 @@ func siteConfig(sensor v1alpha1.KSensor) string {
 	return base
 }
 
+// workerCount defaults omitted values to one to preserve existing installations.
+func workerCount(sensor v1alpha1.KSensor) int32 {
+	n := sensor.Spec.Engine["NSM"].WorkerReplicas
+	if n == 0 {
+		return 1
+	}
+	return n
+}
+
+// workerTopology constructs unique ZeekCtl identities and per-pod DNS services.
+func workerTopology(sensor v1alpha1.KSensor) string {
+	namespace := sensor.Spec.TenantNamespace
+	nodes := strings.ReplaceAll(nsmConfigs["nsm-cluster-node-cfg"], ".yas.svc.", "."+namespace+".svc.")
+	nodes = strings.ReplaceAll(nodes, "host=manager.yas", "host=manager."+namespace)
+	nodes = nodes[:strings.Index(nodes, "[worker-001]")]
+	for i := int32(1); i <= workerCount(sensor); i++ {
+		name := fmt.Sprintf("worker-%03d", i)
+		host := fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace)
+		nodes += fmt.Sprintf("[%s]\ntype=worker\nhost=%s\ninterface=eth0\n\n", name, host)
+	}
+	return nodes
+}
+
 func siteConfigHash(sensor v1alpha1.KSensor) string {
 	scripts, _ := json.Marshal(sensor.Spec.Engine["NSM"].Scripts)
-	return fmt.Sprintf("%x", sha256.Sum256(append([]byte(siteConfig(sensor)), scripts...)))
+	nodes := workerTopology(sensor)
+	return fmt.Sprintf("%x", sha256.Sum256(append([]byte(siteConfig(sensor)+nodes+nsmConfigs["nsm-zeekctl-cfg"]), scripts...)))
 }
 
 func (r *KSensorReconciler) DefineCmNsm(ctx context.Context, logger logr.Logger, ksensorObj v1alpha1.KSensor, appComponentName string, appComponentConf string, appConfConfigKey string) (*corev1.ConfigMap, error) {
@@ -393,6 +414,9 @@ func (r *KSensorReconciler) DefineCmNsm(ctx context.Context, logger logr.Logger,
 			appConfConfigKey: strings.ReplaceAll(nsmConfigs[appComponentName+"-"+appComponentConf], ".yas.svc.", "."+ksensorObj.Spec.TenantNamespace+".svc."),
 		},
 	}
+	if appComponentName == "nsm" && appComponentConf == "cluster-node-cfg" {
+		nsmConfigMap.Data[appConfConfigKey] = workerTopology(ksensorObj)
+	}
 	if appComponentName == "nsm" && appComponentConf == "local-zeek" {
 		nsmConfigMap.Data[appConfConfigKey] = siteConfig(ksensorObj)
 	}
@@ -401,8 +425,8 @@ func (r *KSensorReconciler) DefineCmNsm(ctx context.Context, logger logr.Logger,
 
 }
 
-func (r *KSensorReconciler) DefineSvcNsmCluster(ctx context.Context, logger logr.Logger, ksensorObj v1alpha1.KSensor, nodeType string) (*corev1.Service, error) {
-	nodeInstanceNum := "001"
+func (r *KSensorReconciler) DefineSvcNsmCluster(ctx context.Context, logger logr.Logger, ksensorObj v1alpha1.KSensor, nodeType string, ordinal int32) (*corev1.Service, error) {
+	nodeInstanceNum := fmt.Sprintf("%03d", ordinal+1)
 	nameSuffix := string("")
 
 	if nodeType != "manager" {
@@ -477,7 +501,7 @@ func (r *KSensorReconciler) DefineSvcNsmCluster(ctx context.Context, logger logr
 				},
 			},
 			Selector: map[string]string{
-				"statefulset.kubernetes.io/pod-name": "zeek-" + nodeType + "-0",
+				"statefulset.kubernetes.io/pod-name": fmt.Sprintf("zeek-%s-%d", nodeType, ordinal),
 			},
 		},
 	}
@@ -568,7 +592,7 @@ func (r *KSensorReconciler) DefineSsNsmCluster(ctx context.Context, logger logr.
 							Command: []string{
 								"sh",
 								"-c",
-								"echo $POD_IP $POD_NAME $POD_NS $HOST_IP && if [ $POD_NAME == zeek-manager-0 ]; then export MANAGER=$POD_IP && envsubst < /init/node.cfg > /shared/node.cfg && cat /shared/node.cfg && cp /init/zeekctl.cfg /init/networks.cfg /shared/. && ls -l /shared; fi && echo net.ipv6.conf.all.disable_ipv6=1 | tee -a /etc/sysctl.conf && echo net.ipv6.conf.default.disable_ipv6=1 | tee -a /etc/sysctl.conf && echo net.ipv6.conf.lo.disable_ipv6=1 | tee -a /etc/sysctl.conf",
+								"echo $POD_IP $POD_NAME $POD_NS $HOST_IP && if [ \"$POD_NAME\" = zeek-manager-0 ]; then export MANAGER=$POD_IP && envsubst < /init/node.cfg > /shared/node.cfg && cat /shared/node.cfg && cp /init/zeekctl.cfg /init/networks.cfg /shared/. && ls -l /shared; fi && echo net.ipv6.conf.all.disable_ipv6=1 | tee -a /etc/sysctl.conf && echo net.ipv6.conf.default.disable_ipv6=1 | tee -a /etc/sysctl.conf && echo net.ipv6.conf.lo.disable_ipv6=1 | tee -a /etc/sysctl.conf",
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -712,11 +736,6 @@ func (r *KSensorReconciler) DefineSsNsmCluster(ctx context.Context, logger logr.
 									Name:      "local-zeek",
 									MountPath: "/zeek/share/zeek/site/local.zeek",
 									SubPath:   "local.zeek",
-								},
-								{
-									Name:      "cluster-layout-zeek",
-									MountPath: "/zeek/share/zeek/site/cluster-layout.zeek",
-									SubPath:   "cluster-layout.zeek",
 								},
 								{
 									Name:      "custom",
@@ -1012,22 +1031,6 @@ func (r *KSensorReconciler) DefineSsNsmCluster(ctx context.Context, logger logr.
 							},
 						},
 						{
-							Name: "cluster-layout-zeek",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: "nsm-multi-cluster-layout-zeek",
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "cluster-layout.zeek",
-											Path: "cluster-layout.zeek",
-										},
-									},
-								},
-							},
-						},
-						{
 							Name: "cluster-ssh",
 							VolumeSource: corev1.VolumeSource{
 								Secret: &corev1.SecretVolumeSource{
@@ -1126,6 +1129,9 @@ func (r *KSensorReconciler) DefineSsNsmCluster(ctx context.Context, logger logr.
 		ss.Spec.Template.Spec.Volumes = append(ss.Spec.Template.Spec.Volumes, corev1.Volume{Name: "site-scripts", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "nsm-site-scripts"}}}})
 		ss.Spec.Template.Spec.Containers[0].VolumeMounts = append(ss.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "site-scripts", MountPath: "/zeek/share/zeek/site/managed", ReadOnly: true})
 	}
+	if nodeType == "worker" {
+		ss.Spec.Replicas = ptrOf(workerCount(ksensorObj))
+	}
 	ctrl.SetControllerReference(&ksensorObj, ss, r.Scheme)
 	return ss, nil
 }
@@ -1167,12 +1173,6 @@ func (r *KSensorReconciler) CreateComponentAppNsmCluster(ctx context.Context, lo
 		logger.Error(err, "zeek zeekLocalConfCm failed")
 		return err
 	}
-	zeekClusterConfCm, err := r.DefineCmNsm(ctx, logger, ksensorObj, "nsm", "multi-cluster-layout-zeek", "cluster-layout.zeek")
-	if err != nil {
-		logger.Error(err, "zeek zeekClusterConfCm failed")
-		return err
-	}
-
 	// The deployment references the pre-provisioned nsm-zeek-cluster-ssh Secret.
 
 	// ConfigMaps
@@ -1219,13 +1219,6 @@ func (r *KSensorReconciler) CreateComponentAppNsmCluster(ctx context.Context, lo
 		logger.Error(err, "Failed local-zeek CM")
 		return err
 	}
-	if err = r.CreateOrUpdateCRD(ctx, logger, ksensorObj, zeekClusterConfCm, schema.GroupVersionKind{
-		Kind:    "ConfigMap",
-		Version: "v1",
-	}); err != nil {
-		logger.Error(err, "Failed cluster-layoutut-zeek CM")
-		return err
-	}
 
 	// if err = r.CreateOrUpdateCRD(ctx, logger, ksensorObj, zeekApp, schema.GroupVersionKind{
 	//  Kind:    "Deployment",
@@ -1236,44 +1229,30 @@ func (r *KSensorReconciler) CreateComponentAppNsmCluster(ctx context.Context, lo
 	//  return err
 	// }
 
-	nodes := map[string]int32{
-		"manager": 1,
-		"proxy":   1,
-		"logger":  1,
-		"worker":  1,
-	}
-	for nodeType, nodeNum := range nodes {
-		for i := int32(0); i < nodeNum; i++ {
-			nodeSs, err := r.DefineSsNsmCluster(ctx, logger, ksensorObj, nodeType)
+	for _, nodeType := range []string{"manager", "proxy", "logger", "worker"} {
+		nodeSs, err := r.DefineSsNsmCluster(ctx, logger, ksensorObj, nodeType)
+		if err != nil {
+			return err
+		}
+		if err = r.CreateOrUpdateCRD(ctx, logger, ksensorObj, nodeSs, schema.GroupVersionKind{Kind: "StatefulSet", Group: "apps", Version: "v1"}); err != nil {
+			return err
+		}
+		count := int32(1)
+		if nodeType == "worker" {
+			count = workerCount(ksensorObj)
+		}
+		for i := int32(0); i < count; i++ {
+			svc, err := r.DefineSvcNsmCluster(ctx, logger, ksensorObj, nodeType, i)
 			if err != nil {
-				logger.Error(err, "SS failed")
 				return err
 			}
-			if err = r.CreateOrUpdateCRD(ctx, logger, ksensorObj, nodeSs, schema.GroupVersionKind{
-				Kind:    "StatefulSet",
-				Group:   "apps",
-				Version: "v1",
-			}); err != nil {
-				logger.Error(err, "Failed App Deploy")
-				return err
-			}
-
-			nodeSVC, err := r.DefineSvcNsmCluster(ctx, logger, ksensorObj, nodeType)
-			if err != nil {
-				logger.Error(err, "SVC failed")
-				return err
-			}
-
-			// Service
-			if err = r.CreateOrUpdateCRD(ctx, logger, ksensorObj, nodeSVC, schema.GroupVersionKind{
-				Kind:    "Service",
-				Version: "v1",
-			}); err != nil {
-				logger.Error(err, "Failed App Svc")
+			if err = r.CreateOrUpdateCRD(ctx, logger, ksensorObj, svc, schema.GroupVersionKind{Kind: "Service", Version: "v1"}); err != nil {
 				return err
 			}
 		}
 	}
-
+	if err := r.deleteWorkerServices(ctx, &ksensorObj, workerCount(ksensorObj)); err != nil {
+		return err
+	}
 	return nil
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -81,6 +83,7 @@ func TestAPIServerSiteConfigAndUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := current.Spec.Engine["NSM"]
+	engine.WorkerReplicas = 3
 	engine.SiteConfig = "@load policy/test-b"
 	engine.Scripts["custom"] = "event zeek_init() { print 2; }"
 	current.Spec.Engine["NSM"] = engine
@@ -118,6 +121,59 @@ func TestAPIServerSiteConfigAndUpdate(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("managed scripts not mounted")
+	}
+
+	worker := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "zeek-worker", Namespace: "default"}, worker); err != nil {
+		t.Fatal(err)
+	}
+	if worker.Spec.Replicas == nil || *worker.Spec.Replicas != 3 {
+		t.Fatal("wrong worker replica count")
+	}
+	for _, mount := range worker.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "cluster-layout-zeek" {
+			t.Fatal("must not override ZeekControl-generated layout")
+		}
+	}
+
+	for i, name := range []string{"worker-001", "worker-002", "worker-003"} {
+		svc := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, svc); err != nil {
+			t.Fatal(err)
+		}
+		expected := fmt.Sprintf("zeek-worker-%d", i)
+		if svc.Spec.Selector["statefulset.kubernetes.io/pod-name"] != expected {
+			t.Fatalf("service %s selects wrong pod", name)
+		}
+	}
+	node := &corev1.ConfigMap{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "nsm-cluster-node-cfg", Namespace: "default"}, node); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(node.Data["node.cfg"], "host=worker-003.default.svc.cluster.local") {
+		t.Fatal("missing third worker DNS")
+	}
+	before := set.Spec.Template.Annotations["zeek.yas.ohbmo.com/site-config-sha256"]
+	if err := c.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	engine = current.Spec.Engine["NSM"]
+	engine.WorkerReplicas = 1
+	current.Spec.Engine["NSM"] = engine
+	if err := c.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, setKey, set); err != nil {
+		t.Fatal(err)
+	}
+	if before == set.Spec.Template.Annotations["zeek.yas.ohbmo.com/site-config-sha256"] {
+		t.Fatal("topology change did not roll manager")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "worker-003", Namespace: "default"}, &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale worker service: %v", err)
 	}
 
 }

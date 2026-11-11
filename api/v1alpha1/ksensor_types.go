@@ -62,6 +62,8 @@ type MeshConfig struct {
 }
 
 type EngineApp struct {
+	// WorkerReplicas is the desired number of Zeek workers; zero defaults to one.
+	WorkerReplicas int32 `json:"WorkerReplicas,omitempty"`
 	// SiteConfig appends site policy to the built-in Zeek local.zeek.
 	Scripts       map[string]string `json:"Scripts,omitempty"`
 	SiteConfig    string            `json:"SiteConfig,omitempty"`

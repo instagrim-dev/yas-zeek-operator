@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	v1alpha1 "github.com/instagrim-dev/yas-zeek-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -39,6 +41,9 @@ func (r *ZeekReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	if sensor.Spec.TenantNamespace != sensor.Namespace {
 		return ctrl.Result{}, fmt.Errorf("Zeek tenant namespace %q must equal KSensor namespace %q", sensor.Spec.TenantNamespace, sensor.Namespace)
+	}
+	if count := sensor.Spec.Engine["NSM"].WorkerReplicas; count < 0 || count > 999 {
+		return ctrl.Result{}, fmt.Errorf("WorkerReplicas must be between 1 and 999 (zero uses the default)")
 	}
 	engine := &KSensorReconciler{Client: r.Client, Scheme: r.Scheme}
 	if err := engine.CreateComponentAppNsmCluster(ctx, log.FromContext(ctx), sensor); err != nil {
@@ -82,6 +87,33 @@ func (r *ZeekReconciler) deleteOwnedZeek(ctx context.Context, sensor *v1alpha1.K
 		}
 		uid, version := obj.GetUID(), obj.GetResourceVersion()
 		if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &version}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return (&KSensorReconciler{Client: r.Client, Scheme: r.Scheme}).deleteWorkerServices(ctx, sensor, 0)
+}
+
+// deleteWorkerServices removes stale per-pod Services only when owned by the sensor.
+func (r *KSensorReconciler) deleteWorkerServices(ctx context.Context, sensor *v1alpha1.KSensor, keep int32) error {
+	var list corev1.ServiceList
+	if err := r.List(ctx, &list, client.InNamespace(sensor.Namespace)); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		svc := &list.Items[i]
+		if !strings.HasPrefix(svc.Name, "worker-") || !metav1.IsControlledBy(svc, sensor) {
+			continue
+		}
+		suffix := strings.TrimPrefix(svc.Name, "worker-")
+		if len(suffix) != 3 {
+			continue
+		}
+		ordinal, err := strconv.Atoi(suffix)
+		if err != nil || ordinal < 1 || int32(ordinal) <= keep {
+			continue
+		}
+		uid, version := svc.UID, svc.ResourceVersion
+		if err := r.Delete(ctx, svc, client.Preconditions{UID: &uid, ResourceVersion: &version}); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}

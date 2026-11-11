@@ -27,6 +27,7 @@ spec:
   Engine:
     NSM:
       Enabled: true
+      WorkerReplicas: 1 # Increase only when capture delivery can feed each worker.
       Image: example.invalid/zeek-cluster:replace-me
       CpuLimit: "1"
       MemoryLimit: 1Gi
