@@ -1,0 +1,44 @@
+# The image placeholders below must be replaced with compatible images.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: yas
+---
+apiVersion: zeek.yas.ohbmo.com/v1alpha1
+kind: KSensor
+metadata:
+  name: zeek
+  namespace: yas
+spec:
+  TenantNamespace: yas
+  Mode: OS
+  Ingest:
+    PacketCapture: tcpdump
+    Image: example.invalid/packet-capture:replace-me
+    CpuLimit: 100m
+    MemoryLimit: 128Mi
+  Transport:
+    Upstream: eth0
+    Downstream: /transport/pcap.file
+    Type: shm
+    Image: example.invalid/transport:replace-me
+    CpuLimit: 100m
+    MemoryLimit: 128Mi
+  Engine:
+    NSM:
+      Enabled: true
+      Image: example.invalid/zeek-cluster:replace-me
+      CpuLimit: "1"
+      MemoryLimit: 1Gi
+  Network:
+    Mesh:
+      Image: envoyproxy/envoy:v1.30-latest
+      CpuLimit: 100m
+      MemoryLimit: 128Mi
+  Monitoring:
+    Thanos: {}
+    Metrics:
+      Image: prom/prometheus:v2.51.1
+      CpuLimit: 100m
+      MemoryLimit: 128Mi
+      Replicas: 1

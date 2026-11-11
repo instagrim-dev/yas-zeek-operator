@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: yas-zeek-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: yas-zeek-operator
+  namespace: yas-zeek-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: yas-zeek-operator
+rules:
+- apiGroups: [zeek.yas.ohbmo.com]
+  resources: [ksensors]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [configmaps, services]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [apps]
+  resources: [statefulsets]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: yas-zeek-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: yas-zeek-operator
+subjects:
+- kind: ServiceAccount
+  name: yas-zeek-operator
+  namespace: yas-zeek-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yas-zeek-operator
+  namespace: yas-zeek-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: yas-zeek-operator}
+  template:
+    metadata:
+      labels: {app: yas-zeek-operator}
+    spec:
+      serviceAccountName: yas-zeek-operator
+      containers:
+      - name: manager
+        image: yas-zeek-operator:dev
+        imagePullPolicy: IfNotPresent
+        args: ["--leader-elect", "--metrics-bind-address=:8080"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          capabilities: {drop: [ALL]}
