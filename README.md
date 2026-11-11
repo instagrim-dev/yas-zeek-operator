@@ -15,11 +15,25 @@ Requirements: Kubernetes access, Go 1.21+ for development, a container image bui
 
 The `KSensor` and `spec.TenantNamespace` must share a namespace. Resource names are fixed, so use one sensor per namespace. Set `spec.Engine.NSM.Enabled` to `false` to remove only Zeek resources controlled by that sensor. The custom resource uses a distinct API group from the historical YAS KSensor API; existing objects are not automatically migrated.
 
+Optional `spec.Engine.NSM.SiteConfig` appends Zeek policy to the generated `local.zeek`. `spec.Engine.NSM.Scripts` maps script names to inline Zeek source. The operator writes those scripts to an owned ConfigMap, mounts them read-only, and appends the corresponding `@load` directives. Script names use letters, digits, underscores or hyphens, without an extension. Changes to either policy or scripts roll the Zeek StatefulSets so the mounted policy is refreshed; removing a script removes its managed ConfigMap entry. These facilities adapt the earlier p6m Zeek operator's site configuration and inline-script handling.
+
+```yaml
+spec:
+  Engine:
+    NSM:
+      SiteConfig: 'redef LogAscii::use_json = T;'
+      Scripts:
+        startup: |
+          event zeek_init() { print "managed script loaded"; }
+```
+
+Provide complete Zeek source compatible with the chosen image and keep credentials out of these fields. Configuration reconciliation is tested against the Kubernetes API server; loading scripts in a live Zeek cluster has not been demonstrated.
+
 `kubectl get ksensors.zeek.yas.ohbmo.com -A` lists configured sensors. Observe generated StatefulSets with `kubectl get statefulsets -n yas`. A generated StatefulSet is not proof that Zeek has started or processed traffic.
 
 ## Development
 
-Run `go test ./...`, `go build -o bin/manager ./cmd`, and `kubectl kustomize config`. Tests exercise reconciler behavior using Kubernetes fake clients; they do not start a cluster or check network data. The repository uses new Git history and carries selected Zeek-specific YAS API and controller source, including their Apache-2.0 notices; no historical repository or old keys are included.
+Run `go test ./...`, `go build -o bin/manager ./cmd`, and `kubectl kustomize config`. Most tests use Kubernetes fake clients. An additional test runs against an API server when `KUBEBUILDER_ASSETS` points to envtest binaries; it checks site-policy reconciliation, not packet processing or workload readiness. The repository uses new Git history and carries selected Zeek-specific YAS API and controller source, including their Apache-2.0 notices; no historical repository or old keys are included.
 
 ## License
 

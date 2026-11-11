@@ -67,7 +67,7 @@ func (r *ZeekReconciler) deleteOwnedZeek(ctx context.Context, sensor *v1alpha1.K
 		}
 		objects = append(objects, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sensor.Namespace}})
 	}
-	for _, suffix := range []string{"prometheus-server-config", "mesh-config", "cluster-node-cfg", "zeekctl-cfg", "networks-cfg", "local-zeek", "multi-cluster-layout-zeek"} {
+	for _, suffix := range []string{"prometheus-server-config", "mesh-config", "cluster-node-cfg", "zeekctl-cfg", "networks-cfg", "local-zeek", "multi-cluster-layout-zeek", "site-scripts"} {
 		objects = append(objects, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "nsm-" + suffix, Namespace: sensor.Namespace}})
 	}
 	for _, obj := range objects {

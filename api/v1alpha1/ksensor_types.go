@@ -62,6 +62,9 @@ type MeshConfig struct {
 }
 
 type EngineApp struct {
+	// SiteConfig appends site policy to the built-in Zeek local.zeek.
+	Scripts       map[string]string `json:"Scripts,omitempty"`
+	SiteConfig    string            `json:"SiteConfig,omitempty"`
 	Name          string            `json:"Name,optional,omitempty"`
 	Image         string            `json:"Image"`
 	Enabled       bool              `json:"Enabled,optional"`

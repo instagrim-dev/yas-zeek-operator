@@ -17,6 +17,11 @@ limitations under the License.
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+
+	"github.com/instagrim-dev/yas-zeek-operator/internal/siteconfig"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"strings"
@@ -362,6 +367,21 @@ func ZeekCtrArgs(nodeType string) []string {
 	return cli
 }
 
+func siteConfig(sensor v1alpha1.KSensor) string {
+	base := strings.ReplaceAll(nsmConfigs["nsm-local-zeek"], ".yas.svc.", "."+sensor.Spec.TenantNamespace+".svc.")
+	base = siteconfig.AppendPolicy(base, sensor.Spec.Engine["NSM"].SiteConfig)
+	_, names, _ := siteconfig.ScriptFiles(sensor.Spec.Engine["NSM"].Scripts)
+	for _, name := range names {
+		base += "\n@load ./managed/" + name + "\n"
+	}
+	return base
+}
+
+func siteConfigHash(sensor v1alpha1.KSensor) string {
+	scripts, _ := json.Marshal(sensor.Spec.Engine["NSM"].Scripts)
+	return fmt.Sprintf("%x", sha256.Sum256(append([]byte(siteConfig(sensor)), scripts...)))
+}
+
 func (r *KSensorReconciler) DefineCmNsm(ctx context.Context, logger logr.Logger, ksensorObj v1alpha1.KSensor, appComponentName string, appComponentConf string, appConfConfigKey string) (*corev1.ConfigMap, error) {
 	// Sidecar CM
 	nsmConfigMap := &corev1.ConfigMap{
@@ -372,6 +392,9 @@ func (r *KSensorReconciler) DefineCmNsm(ctx context.Context, logger logr.Logger,
 		Data: map[string]string{
 			appConfConfigKey: strings.ReplaceAll(nsmConfigs[appComponentName+"-"+appComponentConf], ".yas.svc.", "."+ksensorObj.Spec.TenantNamespace+".svc."),
 		},
+	}
+	if appComponentName == "nsm" && appComponentConf == "local-zeek" {
+		nsmConfigMap.Data[appConfConfigKey] = siteConfig(ksensorObj)
 	}
 	ctrl.SetControllerReference(&ksensorObj, nsmConfigMap, r.Scheme)
 	return nsmConfigMap, nil
@@ -491,7 +514,8 @@ func (r *KSensorReconciler) DefineSsNsmCluster(ctx context.Context, logger logr.
 			MinReadySeconds: minReadySeconds,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels(ksensorObj, nodeType),
+					Labels:      labels(ksensorObj, nodeType),
+					Annotations: map[string]string{"zeek.yas.ohbmo.com/site-config-sha256": siteConfigHash(ksensorObj)},
 				},
 				Spec: corev1.PodSpec{
 					Tolerations: []corev1.Toleration{
@@ -1098,10 +1122,18 @@ func (r *KSensorReconciler) DefineSsNsmCluster(ctx context.Context, logger logr.
 			},
 		},
 	}
+	if len(ksensorObj.Spec.Engine["NSM"].Scripts) > 0 {
+		ss.Spec.Template.Spec.Volumes = append(ss.Spec.Template.Spec.Volumes, corev1.Volume{Name: "site-scripts", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "nsm-site-scripts"}}}})
+		ss.Spec.Template.Spec.Containers[0].VolumeMounts = append(ss.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "site-scripts", MountPath: "/zeek/share/zeek/site/managed", ReadOnly: true})
+	}
 	ctrl.SetControllerReference(&ksensorObj, ss, r.Scheme)
 	return ss, nil
 }
 func (r *KSensorReconciler) CreateComponentAppNsmCluster(ctx context.Context, logger logr.Logger, ksensorObj v1alpha1.KSensor) error {
+
+	if err := r.reconcileSiteScripts(ctx, logger, ksensorObj); err != nil {
+		return err
+	}
 
 	metricsCM, err := r.DefineCmSidecar(ctx, logger, ksensorObj, "nsm", "prometheus-server-config", nsmConfigs["nsm-prometheus-server-config"], "prometheus.yaml.tmpl")
 	if err != nil {
